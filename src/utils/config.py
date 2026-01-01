@@ -20,15 +20,16 @@ class Config:
         """Get default configuration."""
         return {
             'model': {
-                'name': 'openai/clip-vit-base-patch32',
+                'name': 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
                 'device': 'cpu',
                 'embedding_dim': 512,
             },
             'index': {
-                'type': 'flat',  # flat, ivf, pq, hnsw
-                'metric': 'l2',
-                'nlist': 100,  # for IVF
-                'hnsw_m': 32,  # for HNSW
+                'type': 'hnsw',
+                'metric': 'cosine',
+                'max_elements': 100000,
+                'ef_construction': 128,
+                'M': 20,
             },
             'video': {
                 'sample_fps': 1,

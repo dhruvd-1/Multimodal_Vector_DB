@@ -19,8 +19,8 @@ def demo_text_search():
     # Initialize search engine
     engine = MultiModalSearchEngine(
         embedding_dim=512,
-        device='cpu',
-        index_type='flat'
+        device='cuda',
+        index_type='hnsw'
     )
 
     print("\nInitializing search engine...")
@@ -71,8 +71,8 @@ def demo_image_search():
     # Initialize search engine
     engine = MultiModalSearchEngine(
         embedding_dim=512,
-        device='cpu',
-        index_type='flat'
+        device='cuda',
+        index_type='hnsw'
     )
 
     print("\nInitializing search engine...")
@@ -121,8 +121,8 @@ def demo_cross_modal_search():
     # Initialize search engine
     engine = MultiModalSearchEngine(
         embedding_dim=512,
-        device='cpu',
-        index_type='flat'
+        device='cuda',
+        index_type='hnsw'
     )
 
     print("\nInitializing search engine...")
@@ -185,14 +185,14 @@ def demo_index_comparison():
     metadata_list = [{'idx': i} for i in range(num_vectors)]
 
     # Test different index types
-    index_types = ['flat', 'ivf', 'hnsw']
+    index_types = ['hnsw']
 
     for idx_type in index_types:
         print(f"\n--- Testing {idx_type.upper()} Index ---")
 
         engine = MultiModalSearchEngine(
             embedding_dim=dimension,
-            device='cpu',
+            device='cuda',
             index_type=idx_type
         )
 
@@ -231,8 +231,8 @@ def demo_batch_processing():
 
     engine = MultiModalSearchEngine(
         embedding_dim=512,
-        device='cpu',
-        index_type='flat'
+        device='cuda',
+        index_type='hnsw'
     )
 
     print("\nInitializing search engine...")

@@ -25,10 +25,10 @@ class TestVectorIndex:
         """Generate sample metadata."""
         return [{'idx': i, 'type': 'test'} for i in range(100)]
 
-    def test_flat_index(self, dimension, sample_vectors, sample_metadata):
-        """Test flat index (exact search)."""
-        index = VectorIndex(dimension=dimension, index_type='flat')
-        index.build_index()
+    def test_hnsw_index_cosine(self, dimension, sample_vectors, sample_metadata):
+        """Test HNSW index with cosine metric."""
+        index = VectorIndex(dimension=dimension, index_type='hnsw', metric='cosine')
+        index.build_index(max_elements=200, ef_construction=128, M=16)
         index.add_vectors(sample_vectors, sample_metadata)
 
         # Test search
@@ -37,26 +37,12 @@ class TestVectorIndex:
 
         assert len(results) == 5
         assert results[0]['metadata']['idx'] == 0  # Should find itself
-        assert results[0]['distance'] < 1e-5  # Near-zero distance
+        assert results[0]['distance'] < 0.1  # Small distance for cosine
 
-    def test_ivf_index(self, dimension, sample_vectors, sample_metadata):
-        """Test IVF index (approximate search)."""
-        index = VectorIndex(dimension=dimension, index_type='ivf')
-        index.build_index(nlist=10)
-        index.add_vectors(sample_vectors, sample_metadata)
-
-        # Test search
-        query = sample_vectors[0]
-        results = index.search(query, k=5)
-
-        assert len(results) == 5
-        # IVF might not be exact but should find close matches
-        assert results[0]['distance'] < 1.0
-
-    def test_hnsw_index(self, dimension, sample_vectors, sample_metadata):
-        """Test HNSW index (graph-based search)."""
-        index = VectorIndex(dimension=dimension, index_type='hnsw')
-        index.build_index(hnsw_m=16)
+    def test_hnsw_index_l2(self, dimension, sample_vectors, sample_metadata):
+        """Test HNSW index with L2 metric."""
+        index = VectorIndex(dimension=dimension, index_type='hnsw', metric='l2')
+        index.build_index(max_elements=200, ef_construction=128, M=16)
         index.add_vectors(sample_vectors, sample_metadata)
 
         # Test search
@@ -66,9 +52,19 @@ class TestVectorIndex:
         assert len(results) == 5
         assert results[0]['metadata']['idx'] == 0
 
+    def test_fp16_compression(self, dimension, sample_vectors, sample_metadata):
+        """Test FP16 compression."""
+        index = VectorIndex(dimension=dimension, index_type='hnsw')
+        index.build_index()
+        index.add_vectors(sample_vectors, sample_metadata)
+
+        # Check compression ratio
+        assert index.compression_ratio == 2.0
+        assert index._use_fp16 is True
+
     def test_batch_search(self, dimension, sample_vectors, sample_metadata):
         """Test batch search."""
-        index = VectorIndex(dimension=dimension, index_type='flat')
+        index = VectorIndex(dimension=dimension, index_type='hnsw', metric='cosine')
         index.build_index()
         index.add_vectors(sample_vectors, sample_metadata)
 
@@ -82,7 +78,7 @@ class TestVectorIndex:
 
     def test_save_load(self, dimension, sample_vectors, sample_metadata):
         """Test saving and loading index."""
-        index = VectorIndex(dimension=dimension, index_type='flat')
+        index = VectorIndex(dimension=dimension, index_type='hnsw', metric='cosine')
         index.build_index()
         index.add_vectors(sample_vectors, sample_metadata)
 
@@ -108,7 +104,7 @@ class TestVectorIndex:
         for i, meta in enumerate(sample_metadata):
             meta['category'] = 'A' if i < 50 else 'B'
 
-        index = VectorIndex(dimension=dimension, index_type='flat')
+        index = VectorIndex(dimension=dimension, index_type='hnsw', metric='cosine')
         index.build_index()
         index.add_vectors(sample_vectors, sample_metadata)
 
@@ -124,7 +120,7 @@ class TestVectorIndex:
 
     def test_get_stats(self, dimension, sample_vectors, sample_metadata):
         """Test getting index statistics."""
-        index = VectorIndex(dimension=dimension, index_type='flat')
+        index = VectorIndex(dimension=dimension, index_type='hnsw', metric='cosine')
         index.build_index()
         index.add_vectors(sample_vectors, sample_metadata)
 
@@ -132,4 +128,6 @@ class TestVectorIndex:
 
         assert stats['total_vectors'] == 100
         assert stats['dimension'] == dimension
-        assert stats['index_type'] == 'flat'
+        assert stats['index_type'] == 'hnsw'
+        assert stats['compression_ratio'] == 2.0
+        assert stats['use_fp16'] is True

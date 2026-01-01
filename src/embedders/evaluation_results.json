@@ -1,0 +1,47 @@
+{
+  "models": [
+    {
+      "model_name": "openclip-vit-b",
+      "image_encode_time_ms": 36.056582001037896,
+      "text_encode_time_ms": 8.999998001963831,
+      "image_batch_throughput": 40.60895153307188,
+      "text_batch_throughput": 346.00953687563725,
+      "model_size_mb": 577.0781211853027,
+      "peak_ram_mb": 50.00390625,
+      "text_to_image_recall_at_1": 0.01,
+      "text_to_image_recall_at_5": 0.05,
+      "text_to_image_recall_at_10": 0.09,
+      "image_to_text_recall_at_1": 0.01,
+      "image_to_text_recall_at_5": 0.05,
+      "image_to_text_recall_at_10": 0.09,
+      "fp16_accuracy_drop": 2.980232238769531e-07,
+      "int8_accuracy_drop": -0.0013082027435302734,
+      "fp16_cosine_similarity": 0.9999997019767761,
+      "int8_cosine_similarity": 1.0013082027435303,
+      "android_compatible": false,
+      "conversion_notes": "\u26a0\ufe0f  Large: 577MB | \u2717 TorchScript failed"
+    },
+    {
+      "model_name": "openclip-vit-s",
+      "image_encode_time_ms": 97.97663200239185,
+      "text_encode_time_ms": 9.180876004393212,
+      "image_batch_throughput": 11.469931181129024,
+      "text_batch_throughput": 363.8237328878189,
+      "model_size_mb": 570.7599067687988,
+      "peak_ram_mb": 147.83203125,
+      "text_to_image_recall_at_1": 0.01,
+      "text_to_image_recall_at_5": 0.04,
+      "text_to_image_recall_at_10": 0.09,
+      "image_to_text_recall_at_1": 0.0,
+      "image_to_text_recall_at_5": 0.02,
+      "image_to_text_recall_at_10": 0.12,
+      "fp16_accuracy_drop": -0.0001633167266845703,
+      "int8_accuracy_drop": -0.00041604042053222656,
+      "fp16_cosine_similarity": 1.0001633167266846,
+      "int8_cosine_similarity": 1.0004160404205322,
+      "android_compatible": false,
+      "conversion_notes": "\u26a0\ufe0f  Large: 571MB | \u2717 TorchScript failed"
+    }
+  ],
+  "timestamp": "2025-12-05 18:25:27"
+}
