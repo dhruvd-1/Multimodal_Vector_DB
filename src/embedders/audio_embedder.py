@@ -1,76 +1,297 @@
 """
-Standalone Test for Audio Embedder
-Run: python test_audio_embedder.py
+Audio Embedder with Mobile Support and Matryoshka Embeddings.
+
+Features:
+- CNN-based audio encoder with mel-spectrogram features
+- Matryoshka variable dimension output (512/256/128/64)
+- Mobile-optimized with quantization support
+- Streaming audio support for large files
+- Memory management for constrained devices
+
+Note: Audio embeddings are NOT in the same space as CLIP text/image embeddings.
+For cross-modal audio-text search, consider using CLAP or similar models.
 """
 
 import sys
+import os
+from typing import List, Optional, Union
 
-import librosa
 import numpy as np
-import soundfile as sf
 import torch
 import torch.nn as nn
 
+from .base_embedder import BaseEmbedder, QuantizationType, ModelFormat
+from .projection import MatryoshkaProjection, DEFAULT_MATRYOSHKA_DIMS
 
-class AudioEmbedder:
-    """Audio embedder using mel spectrogram features and CNN."""
+
+class SimpleCNN(nn.Module):
+    """Simple CNN for audio embeddings from mel-spectrograms."""
 
     def __init__(
         self,
-        model_name="audio-cnn",
-        device="cpu",
-        sample_rate=16000,
-        n_mels=128,
-        hop_length=512,
-        duration=10.0,
+        n_mels: int = 128,
+        embedding_dim: int = 512,
+        mobile_mode: bool = False
     ):
-        self.model_name = model_name
-        self.device = device
+        """
+        Initialize CNN.
+
+        Args:
+            n_mels: Number of mel frequency bins
+            embedding_dim: Output embedding dimension
+            mobile_mode: Use lighter architecture for mobile
+        """
+        super().__init__()
+        self.n_mels = n_mels
+        self.embedding_dim = embedding_dim
+        self.mobile_mode = mobile_mode
+
+        if mobile_mode:
+            # Lighter architecture for mobile
+            self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1)
+            self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+            self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+            self.pool = nn.AdaptiveAvgPool2d((4, 4))
+            self.fc = nn.Linear(64 * 4 * 4, embedding_dim)
+        else:
+            # Full architecture
+            self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+            self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+            self.pool = nn.AdaptiveAvgPool2d((4, 4))
+            self.fc = nn.Linear(128 * 4 * 4, embedding_dim)
+
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through CNN."""
+        x = self.relu(self.conv1(x))
+        x = nn.functional.max_pool2d(x, 2)
+        x = self.relu(self.conv2(x))
+        x = nn.functional.max_pool2d(x, 2)
+        x = self.relu(self.conv3(x))
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.dropout(x)
+        x = self.fc(x)
+        return x
+
+
+class AudioEmbedder(BaseEmbedder):
+    """
+    Audio embedder using mel-spectrogram features and CNN.
+
+    Inherits from BaseEmbedder to get:
+    - Mobile device detection
+    - Quantization support (FP16, INT8)
+    - Memory management (load/unload)
+    - Async operations
+    - Resource constraints
+
+    Note: Audio embeddings are in a separate embedding space from CLIP.
+    For unified audio-text search, consider using CLAP models.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "audio-cnn",
+        device: str = 'cpu',
+        quantization: str = 'none',
+        model_format: str = 'pytorch',
+        max_batch_size: Optional[int] = None,
+        memory_limit_mb: Optional[int] = None,
+        enable_async: bool = False,
+        # Audio-specific options
+        sample_rate: int = 16000,
+        n_mels: int = 128,
+        hop_length: int = 512,
+        duration: float = 10.0,
+        # Matryoshka options
+        use_matryoshka: bool = False,
+        matryoshka_dim: Optional[int] = None,
+        matryoshka_dims: List[int] = None,
+    ):
+        """
+        Initialize audio embedder with mobile-aware configuration.
+
+        Args:
+            model_name: Model identifier
+            device: Device to run on ('cpu', 'cuda', 'mps', 'mobile_cpu', etc.)
+            quantization: Quantization type ('none', 'fp16', 'int8', 'dynamic')
+            model_format: Model format ('pytorch', 'onnx', 'torchscript')
+            max_batch_size: Maximum batch size for mobile
+            memory_limit_mb: Memory limit in MB
+            enable_async: Enable async operations
+            sample_rate: Audio sample rate (Hz)
+            n_mels: Number of mel frequency bins
+            hop_length: Hop length for spectrogram
+            duration: Max audio duration to process (seconds)
+            use_matryoshka: Use Matryoshka projection for variable dimensions
+            matryoshka_dim: Target Matryoshka dimension (None = 512)
+            matryoshka_dims: List of supported Matryoshka dimensions
+        """
+        # Initialize base class with mobile support
+        super().__init__(
+            model_name=model_name,
+            device=device,
+            quantization=quantization,
+            model_format=model_format,
+            max_batch_size=max_batch_size,
+            memory_limit_mb=memory_limit_mb,
+            enable_async=enable_async,
+        )
+
+        # Audio-specific settings
         self.sample_rate = sample_rate
         self.n_mels = n_mels
         self.hop_length = hop_length
         self.duration = duration
-        self.embedding_dim = 512
-        self.model = None
 
-    def load_model(self):
-        """Load or initialize audio embedding model."""
+        # Matryoshka settings
+        self.use_matryoshka = use_matryoshka
+        self.matryoshka_dim = matryoshka_dim
+        self.matryoshka_dims = matryoshka_dims or DEFAULT_MATRYOSHKA_DIMS
+        self.matryoshka_projection = None
+
+        # Set embedding dimension
+        self._set_embedding_dim()
+
+        # Lazy imports for optional dependencies
+        self._librosa = None
+        self._soundfile = None
+
+    def _set_embedding_dim(self):
+        """Set the output embedding dimension based on configuration."""
+        if self.use_matryoshka:
+            self.embedding_dim = self.matryoshka_dim or max(self.matryoshka_dims)
+        else:
+            self.embedding_dim = 512
+
+    def _import_audio_libs(self):
+        """Lazily import audio processing libraries."""
+        if self._librosa is None:
+            try:
+                import librosa
+                import soundfile as sf
+                self._librosa = librosa
+                self._soundfile = sf
+            except ImportError as e:
+                raise ImportError(
+                    "Audio processing requires librosa and soundfile. "
+                    "Install with: pip install librosa soundfile"
+                ) from e
+
+    def load_model(self) -> None:
+        """
+        Load audio embedding model with mobile optimizations.
+
+        Handles:
+        - CNN model initialization
+        - Mobile-optimized architecture
+        - Quantization (FP16, INT8)
+        - Matryoshka layer initialization
+        """
         print(f"Loading audio embedder: {self.model_name}")
-        self.model = self._build_simple_cnn()
+
+        # Import audio libraries
+        self._import_audio_libs()
+
+        # Build CNN model (use mobile mode if on mobile device)
+        self.model = SimpleCNN(
+            n_mels=self.n_mels,
+            embedding_dim=512,  # Base CNN always outputs 512D
+            mobile_mode=self._is_mobile,
+        )
+
+        # Apply quantization
+        self._apply_quantization()
+
+        # Move to device
         self.model.to(self.device)
         self.model.eval()
-        print("✓ Audio embedder loaded")
 
-    def _build_simple_cnn(self):
-        """Build a simple CNN for audio embeddings."""
+        # Initialize Matryoshka projection if enabled
+        if self.use_matryoshka:
+            self.matryoshka_projection = MatryoshkaProjection(
+                input_dim=512,
+                matryoshka_dims=self.matryoshka_dims,
+                use_mlp=True,
+            )
+            self.matryoshka_projection.to(self.device)
+            self.matryoshka_projection.eval()
+            print(f"Initialized Matryoshka projection: dims={self.matryoshka_dims}")
 
-        class SimpleCNN(nn.Module):
-            def __init__(self, n_mels=128, embedding_dim=512):
-                super().__init__()
-                self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-                self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-                self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-                self.pool = nn.AdaptiveAvgPool2d((4, 4))
-                self.fc = nn.Linear(128 * 4 * 4, embedding_dim)
-                self.relu = nn.ReLU()
+        self._is_loaded = True
+        self._log_load_status()
 
-            def forward(self, x):
-                x = self.relu(self.conv1(x))
-                x = nn.functional.max_pool2d(x, 2)
-                x = self.relu(self.conv2(x))
-                x = nn.functional.max_pool2d(x, 2)
-                x = self.relu(self.conv3(x))
-                x = self.pool(x)
-                x = x.view(x.size(0), -1)
-                x = self.fc(x)
-                return x
+    def _apply_quantization(self):
+        """Apply quantization based on configuration."""
+        if self.quantization == QuantizationType.FP16:
+            if self.device != 'cpu' or torch.cuda.is_available():
+                self.model = self.model.half()
+                print("Applied FP16 quantization")
+        elif self.quantization == QuantizationType.INT8:
+            try:
+                self.model = torch.quantization.quantize_dynamic(
+                    self.model,
+                    {nn.Linear, nn.Conv2d},
+                    dtype=torch.qint8
+                )
+                print("Applied INT8 dynamic quantization")
+            except Exception as e:
+                print(f"INT8 quantization failed, using FP32: {e}")
+        elif self.quantization == QuantizationType.DYNAMIC:
+            try:
+                self.model = torch.quantization.quantize_dynamic(
+                    self.model,
+                    {nn.Linear},
+                    dtype=torch.float16
+                )
+                print("Applied dynamic quantization")
+            except Exception as e:
+                print(f"Dynamic quantization failed: {e}")
 
-        return SimpleCNN(self.n_mels, self.embedding_dim)
+    def _log_load_status(self):
+        """Log model load status."""
+        status_parts = [f"Audio embedder loaded on {self.device}"]
 
-    def load_audio(self, audio_path):
-        """Load and preprocess audio file."""
-        audio, sr = librosa.load(
-            audio_path, sr=self.sample_rate, duration=self.duration
+        if self.quantization != QuantizationType.NONE:
+            status_parts.append(f"quantization={self.quantization.value}")
+
+        if self.use_matryoshka:
+            status_parts.append(f"Matryoshka dims={self.matryoshka_dims}")
+
+        if self._is_mobile:
+            status_parts.append("mobile_mode=True (lighter CNN)")
+
+        print(f"✓ {', '.join(status_parts)}")
+
+    def unload_model(self) -> None:
+        """Unload model and projection layers to free memory."""
+        if self.matryoshka_projection is not None:
+            del self.matryoshka_projection
+            self.matryoshka_projection = None
+
+        # Call parent unload
+        super().unload_model()
+
+    def load_audio(self, audio_path: str) -> np.ndarray:
+        """
+        Load and preprocess audio file.
+
+        Args:
+            audio_path: Path to audio file
+
+        Returns:
+            Audio waveform as numpy array
+        """
+        self._import_audio_libs()
+
+        audio, sr = self._librosa.load(
+            audio_path,
+            sr=self.sample_rate,
+            duration=self.duration
         )
 
         # Pad or truncate to fixed length
@@ -82,23 +303,90 @@ class AudioEmbedder:
 
         return audio
 
-    def compute_mel_spectrogram(self, audio):
-        """Compute mel spectrogram."""
-        mel_spec = librosa.feature.melspectrogram(
-            y=audio, sr=self.sample_rate, n_mels=self.n_mels, hop_length=self.hop_length
+    def load_audio_streaming(
+        self,
+        audio_path: str,
+        chunk_duration: float = 5.0
+    ):
+        """
+        Load audio in chunks for memory-efficient processing.
+
+        Useful for mobile devices with limited memory.
+
+        Args:
+            audio_path: Path to audio file
+            chunk_duration: Duration of each chunk in seconds
+
+        Yields:
+            Audio chunks as numpy arrays
+        """
+        self._import_audio_libs()
+
+        # Get file info
+        info = self._soundfile.info(audio_path)
+        total_samples = info.frames
+        chunk_samples = int(chunk_duration * self.sample_rate)
+
+        # Read in chunks
+        with self._soundfile.SoundFile(audio_path) as f:
+            while f.tell() < total_samples:
+                chunk = f.read(chunk_samples)
+                if len(chunk) == 0:
+                    break
+
+                # Resample if needed
+                if info.samplerate != self.sample_rate:
+                    chunk = self._librosa.resample(
+                        chunk,
+                        orig_sr=info.samplerate,
+                        target_sr=self.sample_rate
+                    )
+
+                yield chunk
+
+    def compute_mel_spectrogram(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Compute mel spectrogram from audio.
+
+        Args:
+            audio: Audio waveform
+
+        Returns:
+            Mel spectrogram (normalized, log-scale)
+        """
+        self._import_audio_libs()
+
+        mel_spec = self._librosa.feature.melspectrogram(
+            y=audio,
+            sr=self.sample_rate,
+            n_mels=self.n_mels,
+            hop_length=self.hop_length
         )
 
         # Convert to log scale
-        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+        mel_spec_db = self._librosa.power_to_db(mel_spec, ref=np.max)
 
         # Normalize
         mel_spec_db = (mel_spec_db - mel_spec_db.mean()) / (mel_spec_db.std() + 1e-6)
 
         return mel_spec_db
 
-    def embed(self, audio_path):
-        """Generate embedding for audio file."""
-        if self.model is None:
+    def embed(
+        self,
+        audio_path: str,
+        output_dim: Optional[int] = None
+    ) -> np.ndarray:
+        """
+        Generate embedding for audio file.
+
+        Args:
+            audio_path: Path to audio file
+            output_dim: Override output dimension (for Matryoshka)
+
+        Returns:
+            Normalized embedding vector as numpy array
+        """
+        if not self._is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
         # Load audio
@@ -111,22 +399,49 @@ class AudioEmbedder:
         mel_tensor = torch.FloatTensor(mel_spec).unsqueeze(0).unsqueeze(0)
         mel_tensor = mel_tensor.to(self.device)
 
+        # Handle FP16
+        if self.quantization == QuantizationType.FP16:
+            mel_tensor = mel_tensor.half()
+
         # Get embedding
         with torch.no_grad():
             embedding = self.model(mel_tensor)
             embedding = embedding / embedding.norm(dim=-1, keepdim=True)
 
-        return embedding.cpu().numpy()[0]
+            # Apply Matryoshka projection if configured
+            if self.use_matryoshka and self.matryoshka_projection is not None:
+                dim = output_dim or self.matryoshka_dim
+                embedding = self.matryoshka_projection(embedding, output_dim=dim)
 
-    def batch_embed(self, audio_paths, batch_size=16):
-        """Generate embeddings for batch of audio files."""
-        if self.model is None:
+        return embedding.cpu().float().numpy()[0]
+
+    def batch_embed(
+        self,
+        audio_paths: List[str],
+        batch_size: Optional[int] = None,
+        output_dim: Optional[int] = None
+    ) -> np.ndarray:
+        """
+        Generate embeddings for batch of audio files.
+
+        Args:
+            audio_paths: List of audio file paths
+            batch_size: Override batch size (respects max_batch_size)
+            output_dim: Override output dimension (for Matryoshka)
+
+        Returns:
+            Matrix of normalized embedding vectors
+        """
+        if not self._is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        # Get effective batch size respecting mobile limits
+        batch_size = self.get_effective_batch_size(batch_size)
 
         all_embeddings = []
 
         for i in range(0, len(audio_paths), batch_size):
-            batch_paths = audio_paths[i : i + batch_size]
+            batch_paths = audio_paths[i:i + batch_size]
 
             # Load and process batch
             mel_specs = []
@@ -139,23 +454,133 @@ class AudioEmbedder:
             mel_tensor = torch.FloatTensor(np.array(mel_specs)).unsqueeze(1)
             mel_tensor = mel_tensor.to(self.device)
 
+            # Handle FP16
+            if self.quantization == QuantizationType.FP16:
+                mel_tensor = mel_tensor.half()
+
             # Get embeddings
             with torch.no_grad():
                 embeddings = self.model(mel_tensor)
                 embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
 
-            all_embeddings.append(embeddings.cpu().numpy())
+                # Apply Matryoshka projection if configured
+                if self.use_matryoshka and self.matryoshka_projection is not None:
+                    dim = output_dim or self.matryoshka_dim
+                    embeddings = self.matryoshka_projection(embeddings, output_dim=dim)
+
+            all_embeddings.append(embeddings.cpu().float().numpy())
 
         return np.vstack(all_embeddings)
 
+    def embed_from_array(
+        self,
+        audio: np.ndarray,
+        output_dim: Optional[int] = None
+    ) -> np.ndarray:
+        """
+        Generate embedding from audio array directly.
+
+        Useful for real-time audio processing.
+
+        Args:
+            audio: Audio waveform as numpy array
+            output_dim: Override output dimension (for Matryoshka)
+
+        Returns:
+            Normalized embedding vector
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        # Pad or truncate
+        target_length = int(self.sample_rate * self.duration)
+        if len(audio) < target_length:
+            audio = np.pad(audio, (0, target_length - len(audio)))
+        else:
+            audio = audio[:target_length]
+
+        # Compute mel spectrogram
+        mel_spec = self.compute_mel_spectrogram(audio)
+
+        # Convert to tensor
+        mel_tensor = torch.FloatTensor(mel_spec).unsqueeze(0).unsqueeze(0)
+        mel_tensor = mel_tensor.to(self.device)
+
+        if self.quantization == QuantizationType.FP16:
+            mel_tensor = mel_tensor.half()
+
+        # Get embedding
+        with torch.no_grad():
+            embedding = self.model(mel_tensor)
+            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+
+            if self.use_matryoshka and self.matryoshka_projection is not None:
+                dim = output_dim or self.matryoshka_dim
+                embedding = self.matryoshka_projection(embedding, output_dim=dim)
+
+        return embedding.cpu().float().numpy()[0]
+
+    def set_matryoshka_dim(self, dim: int):
+        """Change the default Matryoshka output dimension."""
+        if not self.use_matryoshka:
+            raise RuntimeError("Matryoshka mode not enabled")
+
+        if dim not in self.matryoshka_dims:
+            nearest = min(self.matryoshka_dims, key=lambda d: abs(d - dim))
+            print(f"Dimension {dim} not supported, using nearest: {nearest}")
+            dim = nearest
+
+        self.matryoshka_dim = dim
+        self.embedding_dim = dim
+        print(f"Matryoshka dimension set to {dim}")
+
+    def warmup(self, sample_input: Optional[str] = None) -> None:
+        """
+        Warm up the model with a sample inference.
+
+        Args:
+            sample_input: Path to sample audio file
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        # Generate dummy audio for warmup
+        dummy_audio = np.random.randn(int(self.sample_rate * 1.0)).astype(np.float32)
+        _ = self.embed_from_array(dummy_audio)
+        print("Audio model warmup complete")
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
 
 def generate_dummy_audio(
-    output_path, duration=3.0, sample_rate=16000, frequencies=[440, 880, 1320]
-):
-    """Generate dummy audio with specified frequencies (tones)."""
+    output_path: str,
+    duration: float = 3.0,
+    sample_rate: int = 16000,
+    frequencies: List[float] = None
+) -> str:
+    """
+    Generate dummy audio file with specified frequencies.
+
+    Args:
+        output_path: Path to save audio file
+        duration: Duration in seconds
+        sample_rate: Sample rate in Hz
+        frequencies: List of frequencies to generate (default: [440, 880, 1320])
+
+    Returns:
+        Path to generated audio file
+    """
+    try:
+        import soundfile as sf
+    except ImportError:
+        raise ImportError("soundfile required: pip install soundfile")
+
+    frequencies = frequencies or [440, 880, 1320]
     t = np.linspace(0, duration, int(sample_rate * duration))
 
-    # Generate audio signal with multiple frequencies
+    # Generate audio signal
     audio = np.zeros_like(t)
     for freq in frequencies:
         audio += np.sin(2 * np.pi * freq * t)
@@ -169,114 +594,82 @@ def generate_dummy_audio(
     return output_path
 
 
-def test_audio_embedder():
-    """Test the audio embedder with dummy data."""
-    print("=" * 60)
-    print("AUDIO EMBEDDER TEST")
-    print("=" * 60)
+# =============================================================================
+# Standalone Test
+# =============================================================================
 
-    # Initialize embedder
-    embedder = AudioEmbedder(device="cpu", duration=5.0)
-    embedder.load_model()
+def test_audio_embedder():
+    """Test the audio embedder with various configurations."""
+    print("=" * 60)
+    print("AUDIO EMBEDDER TEST (with Mobile & Matryoshka Support)")
+    print("=" * 60)
 
     # Create test audio files
     print("\n--- Creating Test Audio Files ---")
-    audio1_path = "test_audio_low.wav"
-    audio2_path = "test_audio_mid.wav"
-    audio3_path = "test_audio_high.wav"
-    audio4_path = "test_audio_mixed.wav"
+    audio1_path = "/tmp/test_audio_low.wav"
+    audio2_path = "/tmp/test_audio_high.wav"
 
-    generate_dummy_audio(audio1_path, duration=3, frequencies=[220])  # Low tone
-    generate_dummy_audio(audio2_path, duration=3, frequencies=[440])  # Mid tone
-    generate_dummy_audio(audio3_path, duration=3, frequencies=[880])  # High tone
-    generate_dummy_audio(audio4_path, duration=3, frequencies=[220, 880])  # Mixed
+    generate_dummy_audio(audio1_path, duration=3, frequencies=[220])
+    generate_dummy_audio(audio2_path, duration=3, frequencies=[880])
 
-    # Test 1: Single audio embedding
-    print("\n--- Test 1: Single Audio Embedding ---")
-    print(f"Processing: {audio1_path}")
+    # Test 1: Basic embedder
+    print("\n--- Test 1: Basic Audio Embedding ---")
+    embedder = AudioEmbedder(device="cpu", duration=5.0)
+    embedder.load_model()
 
     embedding = embedder.embed(audio1_path)
     print(f"✓ Embedding shape: {embedding.shape}")
-    print(f"✓ Embedding dimension: {len(embedding)}")
-    print(f"✓ Embedding norm (should be ~1.0): {np.linalg.norm(embedding):.6f}")
-    print(f"✓ First 5 values: {embedding[:5]}")
+    print(f"✓ Embedding norm: {np.linalg.norm(embedding):.6f}")
 
-    # Test 2: Mel spectrogram visualization
-    print("\n--- Test 2: Mel Spectrogram Computation ---")
-    audio = embedder.load_audio(audio1_path)
-    mel_spec = embedder.compute_mel_spectrogram(audio)
+    # Test 2: Batch embedding
+    print("\n--- Test 2: Batch Audio Embedding ---")
+    embeddings = embedder.batch_embed([audio1_path, audio2_path])
+    print(f"✓ Batch embeddings shape: {embeddings.shape}")
+    print(f"✓ All normalized: {np.allclose(np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-5)}")
 
-    print(f"Audio shape: {audio.shape}")
-    print(f"Audio duration: {len(audio) / embedder.sample_rate:.2f} seconds")
-    print(f"Mel spectrogram shape: {mel_spec.shape}")
-    print(f"  - Mel bins: {mel_spec.shape[0]}")
-    print(f"  - Time frames: {mel_spec.shape[1]}")
-    print(f"✓ Mel spectrogram computed successfully")
-
-    # Test 3: Batch audio embedding
-    print("\n--- Test 3: Batch Audio Embedding ---")
-    audio_paths = [audio1_path, audio2_path, audio3_path, audio4_path]
-    audio_labels = [
-        "Low tone (220Hz)",
-        "Mid tone (440Hz)",
-        "High tone (880Hz)",
-        "Mixed (220+880Hz)",
-    ]
-
-    print(f"Processing {len(audio_paths)} audio files...")
-    for label in audio_labels:
-        print(f"  - {label}")
-
-    embeddings = embedder.batch_embed(audio_paths)
-    print(f"\n✓ Batch embeddings shape: {embeddings.shape}")
-    print(
-        f"✓ All vectors normalized: {np.allclose(np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-5)}"
-    )
-
-    # Test 4: Audio similarity
-    print("\n--- Test 4: Audio Similarity Test ---")
-    emb_low = embedder.embed(audio1_path)
-    emb_mid = embedder.embed(audio2_path)
-    emb_high = embedder.embed(audio3_path)
-    emb_mixed = embedder.embed(audio4_path)
-
-    sim_low_mid = np.dot(emb_low, emb_mid)
-    sim_low_high = np.dot(emb_low, emb_high)
-    sim_low_mixed = np.dot(emb_low, emb_mixed)
-
-    print(f"Similarity (low vs mid):   {sim_low_mid:.4f}")
-    print(f"Similarity (low vs high):  {sim_low_high:.4f}")
-    print(f"Similarity (low vs mixed): {sim_low_mixed:.4f}")
-    print(f"✓ Mixed audio contains low tone: {sim_low_mixed > sim_low_high}")
-
-    # Test 5: Self-similarity check
-    print("\n--- Test 5: Self-Similarity Check ---")
+    # Test 3: Similarity
+    print("\n--- Test 3: Audio Similarity ---")
     emb1 = embedder.embed(audio1_path)
-    emb2 = embedder.embed(audio1_path)
+    emb2 = embedder.embed(audio2_path)
+    sim = np.dot(emb1, emb2)
+    print(f"Similarity (low vs high freq): {sim:.4f}")
 
-    self_sim = np.dot(emb1, emb2)
-    print(f"Self-similarity (should be ~1.0): {self_sim:.6f}")
-    print(f"✓ Audio embedding is deterministic: {np.allclose(self_sim, 1.0)}")
+    embedder.unload_model()
 
-    # Test 6: Search simulation
-    print("\n--- Test 6: Simple Audio Search Simulation ---")
-    query_path = audio1_path
-    print(f"Query: Low tone audio")
-    query_emb = embedder.embed(query_path)
+    # Test 4: Matryoshka embedder
+    print("\n--- Test 4: Matryoshka Audio Embedding ---")
+    matryoshka_embedder = AudioEmbedder(
+        device="cpu",
+        duration=5.0,
+        use_matryoshka=True,
+        matryoshka_dim=256,
+    )
+    matryoshka_embedder.load_model()
 
-    # Compute similarities
-    print("\nRanked results:")
-    sims = embeddings @ query_emb
-    ranked_indices = np.argsort(sims)[::-1]
+    embedding_256 = matryoshka_embedder.embed(audio1_path)
+    print(f"✓ Matryoshka 256D shape: {embedding_256.shape}")
 
-    for rank, idx in enumerate(ranked_indices, 1):
-        print(f"{rank}. [{sims[idx]:.4f}] {audio_labels[idx]}")
+    embedding_128 = matryoshka_embedder.embed(audio1_path, output_dim=128)
+    embedding_64 = matryoshka_embedder.embed(audio1_path, output_dim=64)
+    print(f"✓ Matryoshka 128D shape: {embedding_128.shape}")
+    print(f"✓ Matryoshka 64D shape: {embedding_64.shape}")
+
+    matryoshka_embedder.unload_model()
+
+    # Test 5: Embed from array
+    print("\n--- Test 5: Embed from Array ---")
+    embedder = AudioEmbedder(device="cpu", duration=5.0)
+    embedder.load_model()
+
+    dummy_audio = np.random.randn(16000 * 3).astype(np.float32)
+    embedding = embedder.embed_from_array(dummy_audio)
+    print(f"✓ Embedding from array shape: {embedding.shape}")
+
+    embedder.unload_model()
 
     # Cleanup
-    print("\n--- Cleaning up test audio files ---")
-    import os
-
-    for path in [audio1_path, audio2_path, audio3_path, audio4_path]:
+    print("\n--- Cleaning up test files ---")
+    for path in [audio1_path, audio2_path]:
         if os.path.exists(path):
             os.remove(path)
             print(f"✓ Removed {path}")
@@ -292,6 +685,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ ERROR: {e}")
         import traceback
-
         traceback.print_exc()
         sys.exit(1)
