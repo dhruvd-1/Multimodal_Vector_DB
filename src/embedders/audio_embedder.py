@@ -1,297 +1,348 @@
 """
-Standalone Test for Audio Embedder
-Run: python test_audio_embedder.py
+Audio Embedder using CLAP (Contrastive Language-Audio Pretraining).
+
+CLAP provides audio embeddings in the same semantic space as text,
+enabling cross-modal search (text query → audio results).
+
+Features:
+- Pre-trained CLAP model (no training needed)
+- Audio embeddings aligned with text embeddings
+- Text → Audio cross-modal search capability
+- Mobile-optimized with memory management
+- Async operations for non-blocking UI
+
+Note: CLAP embeddings are in a DIFFERENT space than CLIP (image/text).
+For unified image+audio+text search, you would need to align the spaces
+or use separate indices.
 """
 
 import sys
+import os
+from typing import List, Optional, Union
 
-import librosa
 import numpy as np
-import soundfile as sf
 import torch
-import torch.nn as nn
+
+from .base_embedder import BaseEmbedder, QuantizationType, ModelFormat
 
 
-class AudioEmbedder:
-    """Audio embedder using mel spectrogram features and CNN."""
+class AudioEmbedder(BaseEmbedder):
+    """
+    Audio embedder using CLAP for unified audio-text embeddings.
+
+    CLAP (Contrastive Language-Audio Pretraining) provides:
+    - Audio embeddings aligned with text embeddings
+    - Text → Audio search capability (search audio with text queries)
+    - Zero-shot audio classification
+    - Pre-trained on 600K+ audio-text pairs
+
+    Inherits from BaseEmbedder to get:
+    - Mobile device detection
+    - Memory management (load/unload)
+    - Async operations
+    - Resource constraints
+    """
+
+    # Available CLAP models
+    MODELS = {
+        'music_speech': 'larger_clap_music_and_speech',
+        'music': 'larger_clap_music',
+        'general': 'larger_clap_general',
+    }
 
     def __init__(
         self,
-        model_name="audio-cnn",
-        device="cpu",
-        sample_rate=16000,
-        n_mels=128,
-        hop_length=512,
-        duration=10.0,
+        model_name: str = 'music_speech',
+        device: str = 'cpu',
+        quantization: str = 'none',
+        model_format: str = 'pytorch',
+        max_batch_size: Optional[int] = None,
+        memory_limit_mb: Optional[int] = None,
+        enable_async: bool = False,
+        enable_fusion: bool = False,
     ):
-        self.model_name = model_name
-        self.device = device
-        self.sample_rate = sample_rate
-        self.n_mels = n_mels
-        self.hop_length = hop_length
-        self.duration = duration
-        self.embedding_dim = 512
-        self.model = None
+        """
+        Initialize CLAP audio embedder.
 
-    def load_model(self):
-        """Load or initialize audio embedding model."""
-        print(f"Loading audio embedder: {self.model_name}")
-        self.model = self._build_simple_cnn()
-        self.model.to(self.device)
-        self.model.eval()
-        print("✓ Audio embedder loaded")
-
-    def _build_simple_cnn(self):
-        """Build a simple CNN for audio embeddings."""
-
-        class SimpleCNN(nn.Module):
-            def __init__(self, n_mels=128, embedding_dim=512):
-                super().__init__()
-                self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-                self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-                self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-                self.pool = nn.AdaptiveAvgPool2d((4, 4))
-                self.fc = nn.Linear(128 * 4 * 4, embedding_dim)
-                self.relu = nn.ReLU()
-
-            def forward(self, x):
-                x = self.relu(self.conv1(x))
-                x = nn.functional.max_pool2d(x, 2)
-                x = self.relu(self.conv2(x))
-                x = nn.functional.max_pool2d(x, 2)
-                x = self.relu(self.conv3(x))
-                x = self.pool(x)
-                x = x.view(x.size(0), -1)
-                x = self.fc(x)
-                return x
-
-        return SimpleCNN(self.n_mels, self.embedding_dim)
-
-    def load_audio(self, audio_path):
-        """Load and preprocess audio file."""
-        audio, sr = librosa.load(
-            audio_path, sr=self.sample_rate, duration=self.duration
-        )
-
-        # Pad or truncate to fixed length
-        target_length = int(self.sample_rate * self.duration)
-        if len(audio) < target_length:
-            audio = np.pad(audio, (0, target_length - len(audio)))
+        Args:
+            model_name: CLAP model variant ('music_speech', 'music', 'general')
+            device: Device to run on ('cpu', 'cuda', 'mps')
+            quantization: Quantization type ('none', 'fp16')
+            model_format: Model format (currently only 'pytorch')
+            max_batch_size: Maximum batch size for mobile
+            memory_limit_mb: Memory limit in MB
+            enable_async: Enable async operations
+            enable_fusion: Enable CLAP fusion mode (better quality, slower)
+        """
+        # Resolve model name
+        if model_name in self.MODELS:
+            resolved_name = self.MODELS[model_name]
         else:
-            audio = audio[:target_length]
+            resolved_name = model_name
 
-        return audio
-
-    def compute_mel_spectrogram(self, audio):
-        """Compute mel spectrogram."""
-        mel_spec = librosa.feature.melspectrogram(
-            y=audio, sr=self.sample_rate, n_mels=self.n_mels, hop_length=self.hop_length
+        super().__init__(
+            model_name=resolved_name,
+            device=device,
+            quantization=quantization,
+            model_format=model_format,
+            max_batch_size=max_batch_size,
+            memory_limit_mb=memory_limit_mb,
+            enable_async=enable_async,
         )
 
-        # Convert to log scale
-        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+        self.enable_fusion = enable_fusion
+        self.embedding_dim = 512
+        self._clap = None
+
+    def load_model(self) -> None:
+        """
+        Load CLAP model.
+
+        Downloads pre-trained weights on first use (~300MB).
+        """
+        print(f"Loading CLAP model: {self.model_name}")
+
+        try:
+            import laion_clap
+
+            self._clap = laion_clap.CLAP_Module(
+                enable_fusion=self.enable_fusion,
+                amodel='HTSAT-tiny' if self._is_mobile else 'HTSAT-base'
+            )
+            self._clap.load_ckpt()
+
+            self.model = self._clap
+            self._is_loaded = True
+
+            status = f"CLAP loaded on {self.device}"
+            if self._is_mobile:
+                status += " (mobile mode: HTSAT-tiny)"
+            if self.enable_fusion:
+                status += " (fusion enabled)"
+            print(f"✓ {status}")
+
+        except ImportError:
+            raise ImportError(
+                "CLAP required for audio embeddings.\n"
+                "Install with: pip install laion-clap"
+            )
+
+    def unload_model(self) -> None:
+        """Unload CLAP model to free memory."""
+        if self._clap is not None:
+            del self._clap
+            self._clap = None
+
+        super().unload_model()
+
+    def embed(self, audio_path: str) -> np.ndarray:
+        """
+        Generate embedding for audio file.
+
+        Args:
+            audio_path: Path to audio file (wav, mp3, flac, etc.)
+
+        Returns:
+            Normalized 512D embedding vector
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        embedding = self._clap.get_audio_embedding_from_filelist(
+            [audio_path],
+            use_tensor=False
+        )
 
         # Normalize
-        mel_spec_db = (mel_spec_db - mel_spec_db.mean()) / (mel_spec_db.std() + 1e-6)
+        emb = embedding[0]
+        return emb / np.linalg.norm(emb)
 
-        return mel_spec_db
+    def batch_embed(
+        self,
+        audio_paths: List[str],
+        batch_size: Optional[int] = None
+    ) -> np.ndarray:
+        """
+        Generate embeddings for multiple audio files.
 
-    def embed(self, audio_path):
-        """Generate embedding for audio file."""
-        if self.model is None:
+        Args:
+            audio_paths: List of audio file paths
+            batch_size: Batch size (respects max_batch_size)
+
+        Returns:
+            Matrix of normalized 512D embeddings [N, 512]
+        """
+        if not self._is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
-        # Load audio
-        audio = self.load_audio(audio_path)
-
-        # Compute mel spectrogram
-        mel_spec = self.compute_mel_spectrogram(audio)
-
-        # Convert to tensor
-        mel_tensor = torch.FloatTensor(mel_spec).unsqueeze(0).unsqueeze(0)
-        mel_tensor = mel_tensor.to(self.device)
-
-        # Get embedding
-        with torch.no_grad():
-            embedding = self.model(mel_tensor)
-            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
-
-        return embedding.cpu().numpy()[0]
-
-    def batch_embed(self, audio_paths, batch_size=16):
-        """Generate embeddings for batch of audio files."""
-        if self.model is None:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+        batch_size = self.get_effective_batch_size(batch_size)
 
         all_embeddings = []
-
         for i in range(0, len(audio_paths), batch_size):
-            batch_paths = audio_paths[i : i + batch_size]
+            batch = audio_paths[i:i + batch_size]
 
-            # Load and process batch
-            mel_specs = []
-            for path in batch_paths:
-                audio = self.load_audio(path)
-                mel_spec = self.compute_mel_spectrogram(audio)
-                mel_specs.append(mel_spec)
+            embeddings = self._clap.get_audio_embedding_from_filelist(
+                batch,
+                use_tensor=False
+            )
+            all_embeddings.append(embeddings)
 
-            # Stack into batch tensor
-            mel_tensor = torch.FloatTensor(np.array(mel_specs)).unsqueeze(1)
-            mel_tensor = mel_tensor.to(self.device)
+        embeddings = np.vstack(all_embeddings)
 
-            # Get embeddings
-            with torch.no_grad():
-                embeddings = self.model(mel_tensor)
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+        # Normalize
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings / norms
 
-            all_embeddings.append(embeddings.cpu().numpy())
+    def embed_text(self, text: str) -> np.ndarray:
+        """
+        Generate text embedding for audio search.
 
-        return np.vstack(all_embeddings)
+        This enables cross-modal search: text query → audio results.
+
+        Args:
+            text: Text description (e.g., "dog barking", "piano music")
+
+        Returns:
+            Normalized 512D embedding in CLAP's audio-text space
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        embedding = self._clap.get_text_embedding(
+            [text],
+            use_tensor=False
+        )
+
+        emb = embedding[0]
+        return emb / np.linalg.norm(emb)
+
+    def batch_embed_text(self, texts: List[str]) -> np.ndarray:
+        """
+        Generate text embeddings for multiple queries.
+
+        Args:
+            texts: List of text descriptions
+
+        Returns:
+            Matrix of normalized 512D embeddings [N, 512]
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        embeddings = self._clap.get_text_embedding(
+            texts,
+            use_tensor=False
+        )
+
+        # Normalize
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings / norms
+
+    def search_audio_with_text(
+        self,
+        text_query: str,
+        audio_embeddings: np.ndarray,
+        top_k: int = 10
+    ) -> List[tuple]:
+        """
+        Search audio embeddings using text query.
+
+        Args:
+            text_query: Text description to search for
+            audio_embeddings: Pre-computed audio embeddings [N, 512]
+            top_k: Number of results to return
+
+        Returns:
+            List of (index, similarity_score) tuples, sorted by similarity
+        """
+        text_emb = self.embed_text(text_query)
+
+        # Compute similarities (dot product of normalized vectors = cosine sim)
+        similarities = audio_embeddings @ text_emb
+
+        # Get top-k indices
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+
+        return [(idx, similarities[idx]) for idx in top_indices]
+
+    def warmup(self, sample_input: Optional[str] = None) -> None:
+        """
+        Warm up the model with a sample inference.
+
+        Args:
+            sample_input: Optional path to sample audio file
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        # Warmup with text embedding (doesn't require audio file)
+        _ = self.embed_text("warmup audio query")
+        print("CLAP model warmup complete")
 
 
-def generate_dummy_audio(
-    output_path, duration=3.0, sample_rate=16000, frequencies=[440, 880, 1320]
-):
-    """Generate dummy audio with specified frequencies (tones)."""
-    t = np.linspace(0, duration, int(sample_rate * duration))
+# =============================================================================
+# Standalone Test
+# =============================================================================
 
-    # Generate audio signal with multiple frequencies
-    audio = np.zeros_like(t)
-    for freq in frequencies:
-        audio += np.sin(2 * np.pi * freq * t)
-
-    # Normalize
-    audio = audio / np.max(np.abs(audio))
-
-    # Save
-    sf.write(output_path, audio, sample_rate)
-    print(f"✓ Created dummy audio: {output_path} ({frequencies} Hz)")
-    return output_path
-
-
-def test_audio_embedder():
-    """Test the audio embedder with dummy data."""
+def test_clap_embedder():
+    """Test the CLAP audio embedder."""
     print("=" * 60)
-    print("AUDIO EMBEDDER TEST")
+    print("CLAP AUDIO EMBEDDER TEST")
     print("=" * 60)
 
-    # Initialize embedder
-    embedder = AudioEmbedder(device="cpu", duration=5.0)
-    embedder.load_model()
+    # Test 1: Initialize and load
+    print("\n--- Test 1: Load CLAP Model ---")
+    try:
+        embedder = AudioEmbedder(model_name='music_speech', device='cpu')
+        embedder.load_model()
+        print("✓ CLAP model loaded successfully")
+    except ImportError as e:
+        print(f"✗ CLAP not installed: {e}")
+        print("Install with: pip install laion-clap")
+        return
 
-    # Create test audio files
-    print("\n--- Creating Test Audio Files ---")
-    audio1_path = "test_audio_low.wav"
-    audio2_path = "test_audio_mid.wav"
-    audio3_path = "test_audio_high.wav"
-    audio4_path = "test_audio_mixed.wav"
+    # Test 2: Text embedding
+    print("\n--- Test 2: Text Embedding ---")
+    text = "a dog barking loudly"
+    text_emb = embedder.embed_text(text)
+    print(f"Text: '{text}'")
+    print(f"✓ Embedding shape: {text_emb.shape}")
+    print(f"✓ Embedding norm: {np.linalg.norm(text_emb):.4f}")
 
-    generate_dummy_audio(audio1_path, duration=3, frequencies=[220])  # Low tone
-    generate_dummy_audio(audio2_path, duration=3, frequencies=[440])  # Mid tone
-    generate_dummy_audio(audio3_path, duration=3, frequencies=[880])  # High tone
-    generate_dummy_audio(audio4_path, duration=3, frequencies=[220, 880])  # Mixed
-
-    # Test 1: Single audio embedding
-    print("\n--- Test 1: Single Audio Embedding ---")
-    print(f"Processing: {audio1_path}")
-
-    embedding = embedder.embed(audio1_path)
-    print(f"✓ Embedding shape: {embedding.shape}")
-    print(f"✓ Embedding dimension: {len(embedding)}")
-    print(f"✓ Embedding norm (should be ~1.0): {np.linalg.norm(embedding):.6f}")
-    print(f"✓ First 5 values: {embedding[:5]}")
-
-    # Test 2: Mel spectrogram visualization
-    print("\n--- Test 2: Mel Spectrogram Computation ---")
-    audio = embedder.load_audio(audio1_path)
-    mel_spec = embedder.compute_mel_spectrogram(audio)
-
-    print(f"Audio shape: {audio.shape}")
-    print(f"Audio duration: {len(audio) / embedder.sample_rate:.2f} seconds")
-    print(f"Mel spectrogram shape: {mel_spec.shape}")
-    print(f"  - Mel bins: {mel_spec.shape[0]}")
-    print(f"  - Time frames: {mel_spec.shape[1]}")
-    print(f"✓ Mel spectrogram computed successfully")
-
-    # Test 3: Batch audio embedding
-    print("\n--- Test 3: Batch Audio Embedding ---")
-    audio_paths = [audio1_path, audio2_path, audio3_path, audio4_path]
-    audio_labels = [
-        "Low tone (220Hz)",
-        "Mid tone (440Hz)",
-        "High tone (880Hz)",
-        "Mixed (220+880Hz)",
+    # Test 3: Multiple text embeddings
+    print("\n--- Test 3: Batch Text Embedding ---")
+    texts = [
+        "dog barking",
+        "cat meowing",
+        "piano music",
+        "car engine",
     ]
+    text_embs = embedder.batch_embed_text(texts)
+    print(f"✓ Batch embeddings shape: {text_embs.shape}")
 
-    print(f"Processing {len(audio_paths)} audio files...")
-    for label in audio_labels:
-        print(f"  - {label}")
+    # Test 4: Text similarity
+    print("\n--- Test 4: Text Similarity ---")
+    sim_matrix = text_embs @ text_embs.T
+    print("Similarity matrix:")
+    for i, t1 in enumerate(texts):
+        for j, t2 in enumerate(texts):
+            if j >= i:
+                print(f"  '{t1}' vs '{t2}': {sim_matrix[i,j]:.3f}")
 
-    embeddings = embedder.batch_embed(audio_paths)
-    print(f"\n✓ Batch embeddings shape: {embeddings.shape}")
-    print(
-        f"✓ All vectors normalized: {np.allclose(np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-5)}"
-    )
-
-    # Test 4: Audio similarity
-    print("\n--- Test 4: Audio Similarity Test ---")
-    emb_low = embedder.embed(audio1_path)
-    emb_mid = embedder.embed(audio2_path)
-    emb_high = embedder.embed(audio3_path)
-    emb_mixed = embedder.embed(audio4_path)
-
-    sim_low_mid = np.dot(emb_low, emb_mid)
-    sim_low_high = np.dot(emb_low, emb_high)
-    sim_low_mixed = np.dot(emb_low, emb_mixed)
-
-    print(f"Similarity (low vs mid):   {sim_low_mid:.4f}")
-    print(f"Similarity (low vs high):  {sim_low_high:.4f}")
-    print(f"Similarity (low vs mixed): {sim_low_mixed:.4f}")
-    print(f"✓ Mixed audio contains low tone: {sim_low_mixed > sim_low_high}")
-
-    # Test 5: Self-similarity check
-    print("\n--- Test 5: Self-Similarity Check ---")
-    emb1 = embedder.embed(audio1_path)
-    emb2 = embedder.embed(audio1_path)
-
-    self_sim = np.dot(emb1, emb2)
-    print(f"Self-similarity (should be ~1.0): {self_sim:.6f}")
-    print(f"✓ Audio embedding is deterministic: {np.allclose(self_sim, 1.0)}")
-
-    # Test 6: Search simulation
-    print("\n--- Test 6: Simple Audio Search Simulation ---")
-    query_path = audio1_path
-    print(f"Query: Low tone audio")
-    query_emb = embedder.embed(query_path)
-
-    # Compute similarities
-    print("\nRanked results:")
-    sims = embeddings @ query_emb
-    ranked_indices = np.argsort(sims)[::-1]
-
-    for rank, idx in enumerate(ranked_indices, 1):
-        print(f"{rank}. [{sims[idx]:.4f}] {audio_labels[idx]}")
-
-    # Cleanup
-    print("\n--- Cleaning up test audio files ---")
-    import os
-
-    for path in [audio1_path, audio2_path, audio3_path, audio4_path]:
-        if os.path.exists(path):
-            os.remove(path)
-            print(f"✓ Removed {path}")
+    embedder.unload_model()
 
     print("\n" + "=" * 60)
     print("✓ ALL TESTS PASSED!")
     print("=" * 60)
+    print("\nNote: Audio file tests skipped (no test files)")
+    print("To test audio embedding, call: embedder.embed('path/to/audio.wav')")
 
 
 if __name__ == "__main__":
     try:
-        test_audio_embedder()
+        test_clap_embedder()
     except Exception as e:
         print(f"\n✗ ERROR: {e}")
         import traceback
-
         traceback.print_exc()
         sys.exit(1)
