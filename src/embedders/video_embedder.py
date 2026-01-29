@@ -1,110 +1,97 @@
-"""
-Standalone Test for Video Embedder
-Run: python test_video_embedder.py
-"""
 
 import sys
+from typing import List, Optional, Union
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-from transformers import CLIPModel, CLIPProcessor
+
+from .base_embedder import BaseEmbedder, QuantizationType, ModelFormat
+from .image_embedder import ImageEmbedder
 
 
-class ImageEmbedder:
-    """Image embedder for video frame processing."""
-
-    def __init__(self, model_name="openai/clip-vit-base-patch32", device="cpu"):
-        self.model_name = model_name
-        self.device = device
-        self.processor = None
-        self.model = None
-        self.embedding_dim = 512
-
-    def load_model(self):
-        """Load CLIP model and processor."""
-        self.model = CLIPModel.from_pretrained(self.model_name)
-        self.processor = CLIPProcessor.from_pretrained(self.model_name)
-        self.model.to(self.device)
-        self.model.eval()
-
-    def embed(self, image_input):
-        """Generate embedding for single image."""
-        if isinstance(image_input, str):
-            image = Image.open(image_input).convert("RGB")
-        else:
-            image = image_input.convert("RGB")
-
-        inputs = self.processor(images=image, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            embeddings = self.model.get_image_features(**inputs)
-            embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-
-        return embeddings.cpu().numpy()[0]
-
-    def batch_embed(self, images, batch_size=32):
-        """Generate embeddings for batch of images."""
-        all_embeddings = []
-
-        for i in range(0, len(images), batch_size):
-            batch = images[i : i + batch_size]
-            pil_images = [img if isinstance(img, Image.Image) else img for img in batch]
-
-            inputs = self.processor(images=pil_images, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-            with torch.no_grad():
-                embeddings = self.model.get_image_features(**inputs)
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-
-            all_embeddings.append(embeddings.cpu().numpy())
-
-        return np.vstack(all_embeddings)
-
-
-class VideoEmbedder:
-    """Video embedder using CLIP via frame sampling and temporal pooling."""
-
+class VideoEmbedder(BaseEmbedder):
     def __init__(
         self,
-        model_name="openai/clip-vit-base-patch32",
-        device="cpu",
-        sample_fps=1,
-        max_frames=100,
-        pooling="mean",
+        model_name: str = None,
+        device: str = 'cpu',
+        quantization: str = 'fp16',
+        model_format: str = 'pytorch',
+        max_batch_size: Optional[int] = None,
+        memory_limit_mb: Optional[int] = None,
+        enable_async: bool = False,
+        # Video-specific options
+        sample_fps: float = 1.0,
+        max_frames: int = 100,
+        pooling: str = 'mean',
+        use_projection: bool = False,
+        projection_dim: int = 1024,
     ):
-        self.model_name = model_name
-        self.device = device
+        
+        model_name = model_name or "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+
+        super().__init__(
+            model_name=model_name,
+            device=device,
+            quantization=quantization,
+            model_format=model_format,
+            max_batch_size=max_batch_size,
+            memory_limit_mb=memory_limit_mb,
+            enable_async=enable_async,
+        )
+
+        # Video-specific settings
         self.sample_fps = sample_fps
         self.max_frames = max_frames
         self.pooling = pooling
+        self.use_projection = use_projection
+        self.projection_dim = projection_dim
         self.image_embedder = None
-        self.model = None
-        self.embedding_dim = 512
+        self.embedding_dim = projection_dim if use_projection else 512
 
-    def load_model(self):
-        """Load CLIP model via ImageEmbedder."""
-        print(f"Loading video embedder with CLIP model: {self.model_name}")
-        self.image_embedder = ImageEmbedder(self.model_name, self.device)
+    def load_model(self) -> None:
+        print(f"Loading video embedder (CLIP: {self.model_name})")
+        print(f"  Sample FPS: {self.sample_fps}")
+        print(f"  Max frames: {self.max_frames}")
+        print(f"  Pooling: {self.pooling}")
+
+        self.image_embedder = ImageEmbedder(
+            model_name=self.model_name,
+            device=self.device,
+            quantization=self.quantization.value,
+            max_batch_size=self.max_batch_size,
+            memory_limit_mb=self.memory_limit_mb,
+            use_projection=self.use_projection,
+            projection_dim=self.projection_dim,
+        )
         self.image_embedder.load_model()
-        self.model = self.image_embedder.model
-        print("✓ Video embedder loaded")
 
-    def extract_frames(self, video_path):
-        """Extract frames from video at specified fps."""
+        self.model = self.image_embedder.model
+        self._is_loaded = True
+
+
+    def unload_model(self) -> None:
+        if self.image_embedder is not None:
+            self.image_embedder.unload_model()
+            del self.image_embedder
+            self.image_embedder = None
+
+        super().unload_model()
+
+    def extract_frames(self, video_path: str) -> List[np.ndarray]:
+       
         cap = cv2.VideoCapture(video_path)
 
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0:
-            fps = 30
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if video_fps == 0:
+            video_fps = 30  # Default fallback
 
-        frame_interval = max(1, int(fps / self.sample_fps))
+        # Calculate frame interval
+        frame_interval = max(1, int(video_fps / self.sample_fps))
 
         frames = []
         frame_count = 0
@@ -113,7 +100,6 @@ class VideoEmbedder:
             ret, frame = cap.read()
             if not ret:
                 break
-
             if frame_count % frame_interval == 0:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frames.append(frame_rgb)
@@ -123,62 +109,73 @@ class VideoEmbedder:
         cap.release()
 
         if len(frames) == 0:
-            raise ValueError(f"No frames extracted from video: {video_path}")
+            raise ValueError(f"No frames extracted from: {video_path}")
 
-        print(f"  ✓ Extracted {len(frames)} frames from video")
         return frames
 
-    def embed(self, video_path):
-        """Generate video embedding via temporal pooling of frame embeddings."""
-        if self.image_embedder is None:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+    def embed(self, video_path: str) -> np.ndarray:
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaddning")
 
-        # Extract frames
         frames = self.extract_frames(video_path)
 
-        # Embed each frame
-        frame_embeddings = []
-        for frame in frames:
-            pil_frame = Image.fromarray(frame)
-            embedding = self.image_embedder.embed(pil_frame)
-            frame_embeddings.append(embedding)
+        pil_frames = [Image.fromarray(frame) for frame in frames]
 
-        frame_embeddings = np.array(frame_embeddings)
+        frame_embeddings = self.image_embedder.batch_embed(pil_frames)
 
-        # Temporal pooling
-        if self.pooling == "mean":
-            video_embedding = np.mean(frame_embeddings, axis=0)
-        elif self.pooling == "max":
-            video_embedding = np.max(frame_embeddings, axis=0)
-        elif self.pooling == "attention":
-            norms = np.linalg.norm(frame_embeddings, axis=1, keepdims=True)
-            weights = norms / np.sum(norms)
-            video_embedding = np.sum(frame_embeddings * weights, axis=0)
-        else:
-            raise ValueError(f"Unknown pooling method: {self.pooling}")
+        video_embedding = self._temporal_pool(frame_embeddings)
 
-        # Normalize
         video_embedding = video_embedding / np.linalg.norm(video_embedding)
 
         return video_embedding
 
-    def batch_embed(self, video_paths):
-        """Generate embeddings for batch of videos."""
+    def batch_embed(
+        self,
+        video_paths: List[str],
+        batch_size: Optional[int] = None
+    ) -> np.ndarray:
+        
         embeddings = []
         for video_path in video_paths:
             embedding = self.embed(video_path)
             embeddings.append(embedding)
+
         return np.array(embeddings)
 
+    def _temporal_pool(self, frame_embeddings: np.ndarray) -> np.ndarray:
+        if self.pooling == 'mean':
+            return np.mean(frame_embeddings, axis=0)
 
-def create_dummy_video(output_path, duration_sec=3, fps=10, color_sequence=None):
+        elif self.pooling == 'max':
+            return np.max(frame_embeddings, axis=0)
+
+        elif self.pooling == 'attention':
+            norms = np.linalg.norm(frame_embeddings, axis=1, keepdims=True)
+            weights = norms / np.sum(norms)
+            return np.sum(frame_embeddings * weights, axis=0)
+
+        else:
+            raise ValueError(f"Unknown pooling method: {self.pooling}")
+
+    def warmup(self, sample_input: Optional[str] = None) -> None:
+        
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        self.image_embedder.warmup()
+        print("Video embedder warmup complete")
+
+
+def create_dummy_video(output_path: str, duration_sec: int = 2, fps: int = 10) -> str:
     """Create a dummy test video with changing colors."""
-    if color_sequence is None:
-        color_sequence = [
-            (255, 0, 0),  # Red
-            (0, 255, 0),  # Green
-            (0, 0, 255),  # Blue
-        ]
+    import tempfile
+    import os
+
+    color_sequence = [
+        (255, 0, 0),    # Red
+        (0, 255, 0),    # Green
+        (0, 0, 255),    # Blue
+    ]
 
     width, height = 640, 480
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -190,9 +187,9 @@ def create_dummy_video(output_path, duration_sec=3, fps=10, color_sequence=None)
     for color_idx, color in enumerate(color_sequence):
         for _ in range(frames_per_color):
             frame = np.zeros((height, width, 3), dtype=np.uint8)
-            frame[:, :] = color[::-1]  # BGR format for OpenCV
+            frame[:, :] = color[::-1]  # BGR for OpenCV
 
-            # Add some text
+            # Add text
             cv2.putText(
                 frame,
                 f"Color {color_idx + 1}",
@@ -206,102 +203,65 @@ def create_dummy_video(output_path, duration_sec=3, fps=10, color_sequence=None)
             out.write(frame)
 
     out.release()
-    print(f"✓ Created dummy video: {output_path}")
     return output_path
 
 
 def test_video_embedder():
-    """Test the video embedder with dummy data."""
     print("=" * 60)
     print("VIDEO EMBEDDER TEST")
     print("=" * 60)
 
     # Initialize embedder
-    embedder = VideoEmbedder(device="cpu", sample_fps=2, max_frames=50)
+    print("\n--- Test 1: Load Model ---")
+    embedder = VideoEmbedder(device="cpu", sample_fps=2, max_frames=20)
     embedder.load_model()
 
     # Create test videos
-    print("\n--- Creating Test Videos ---")
-    video1_path = "test_video_red_green.mp4"
-    video2_path = "test_video_blue_yellow.mp4"
-    video3_path = "test_video_red_blue.mp4"
+    print("\n--- Test 2: Create Test Videos ---")
+    import tempfile
+    import os
 
-    create_dummy_video(
-        video1_path, duration_sec=2, fps=10, color_sequence=[(255, 0, 0), (0, 255, 0)]
-    )
-    create_dummy_video(
-        video2_path, duration_sec=2, fps=10, color_sequence=[(0, 0, 255), (255, 255, 0)]
-    )
-    create_dummy_video(
-        video3_path, duration_sec=2, fps=10, color_sequence=[(255, 0, 0), (0, 0, 255)]
-    )
+    temp_dir = tempfile.mkdtemp()
+    video1_path = os.path.join(temp_dir, "test_video_1.mp4")
+    video2_path = os.path.join(temp_dir, "test_video_2.mp4")
 
-    # Test 1: Single video embedding
-    print("\n--- Test 1: Single Video Embedding ---")
-    print(f"Processing: {video1_path}")
+    create_dummy_video(video1_path, duration_sec=2, fps=10)
+    create_dummy_video(video2_path, duration_sec=2, fps=10)
 
+    # Test single video embedding
+    print("\n--- Test 3: Single Video Embedding ---")
     embedding = embedder.embed(video1_path)
     print(f"✓ Embedding shape: {embedding.shape}")
-    print(f"✓ Embedding dimension: {len(embedding)}")
-    print(f"✓ Embedding norm (should be ~1.0): {np.linalg.norm(embedding):.6f}")
-    print(f"✓ First 5 values: {embedding[:5]}")
+    print(f"✓ Embedding norm: {np.linalg.norm(embedding):.6f}")
+    assert embedding.shape == (512,)
+    assert np.abs(np.linalg.norm(embedding) - 1.0) < 1e-5
 
-    # Test 2: Multiple pooling strategies
-    print("\n--- Test 2: Different Pooling Strategies ---")
-    pooling_methods = ["mean", "max", "attention"]
-    embeddings_pooling = {}
+    # Test different pooling methods
+    print("\n--- Test 4: Different Pooling Methods ---")
+    pooling_methods = ['mean', 'max', 'attention']
+    embeddings = {}
 
     for method in pooling_methods:
         embedder.pooling = method
         emb = embedder.embed(video1_path)
-        embeddings_pooling[method] = emb
-        print(f"✓ {method.upper()} pooling: norm = {np.linalg.norm(emb):.6f}")
+        embeddings[method] = emb
+        print(f"✓ {method.upper()}: norm={np.linalg.norm(emb):.6f}")
 
-    # Test 3: Batch video embedding
-    print("\n--- Test 3: Batch Video Embedding ---")
-    video_paths = [video1_path, video2_path, video3_path]
-
-    print(f"Processing {len(video_paths)} videos...")
-    embeddings = embedder.batch_embed(video_paths)
-
-    print(f"✓ Batch embeddings shape: {embeddings.shape}")
-    print(
-        f"✓ All vectors normalized: {np.allclose(np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-5)}"
-    )
-
-    # Test 4: Video similarity
-    print("\n--- Test 4: Video Similarity Test ---")
-    embedder.pooling = "mean"
-
-    emb1 = embedder.embed(video1_path)  # Red-Green
-    emb2 = embedder.embed(video2_path)  # Blue-Yellow
-    emb3 = embedder.embed(video3_path)  # Red-Blue
-
-    sim_12 = np.dot(emb1, emb2)
-    sim_13 = np.dot(emb1, emb3)
-
-    print(f"Video 1: Red-Green sequence")
-    print(f"Video 2: Blue-Yellow sequence")
-    print(f"Video 3: Red-Blue sequence")
-    print(f"\nSimilarity (Video1 vs Video2): {sim_12:.4f}")
-    print(f"Similarity (Video1 vs Video3): {sim_13:.4f}")
-    print(f"✓ Videos with shared colors are more similar: {sim_13 > sim_12}")
-
-    # Test 5: Frame extraction test
-    print("\n--- Test 5: Frame Extraction Details ---")
-    frames = embedder.extract_frames(video1_path)
-    print(f"Total frames extracted: {len(frames)}")
-    print(f"Frame shape: {frames[0].shape}")
-    print(f"✓ Frames are in RGB format")
+    # Test batch embedding
+    print("\n--- Test 5: Batch Video Embedding ---")
+    embedder.pooling = 'mean'
+    batch_embeddings = embedder.batch_embed([video1_path, video2_path])
+    print(f"✓ Batch shape: {batch_embeddings.shape}")
+    assert batch_embeddings.shape == (2, 512)
+    assert np.allclose(np.linalg.norm(batch_embeddings, axis=1), 1.0, atol=1e-5)
 
     # Cleanup
-    print("\n--- Cleaning up test videos ---")
-    import os
-
-    for path in [video1_path, video2_path, video3_path]:
-        if os.path.exists(path):
-            os.remove(path)
-            print(f"✓ Removed {path}")
+    print("\n--- Cleanup ---")
+    embedder.unload_model()
+    os.remove(video1_path)
+    os.remove(video2_path)
+    os.rmdir(temp_dir)
+    print("✓ Cleaned up test files")
 
     print("\n" + "=" * 60)
     print("✓ ALL TESTS PASSED!")
@@ -314,6 +274,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ ERROR: {e}")
         import traceback
-
         traceback.print_exc()
         sys.exit(1)

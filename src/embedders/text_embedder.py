@@ -264,8 +264,13 @@ class TextEmbedder(BaseEmbedder):
 
         # Get embedding
         with torch.no_grad():
-            embeddings = self.model.get_text_features(**inputs)
-            embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+            # Use text_model directly to get pooler_output
+            text_outputs = self.model.text_model(**inputs)
+            pooled_output = text_outputs.pooler_output  # [batch, 768]
+            text_embeds = self.model.text_projection(pooled_output)  # [batch, 512]
+
+            # Normalize
+            embeddings = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
 
             # Apply projection if configured
             embeddings = self._apply_projection(embeddings, output_dim)
@@ -312,8 +317,13 @@ class TextEmbedder(BaseEmbedder):
 
             # Get embeddings
             with torch.no_grad():
-                embeddings = self.model.get_text_features(**inputs)
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+                # Use text_model directly to get pooler_output
+                text_outputs = self.model.text_model(**inputs)
+                pooled_output = text_outputs.pooler_output  # [batch, 768]
+                text_embeds = self.model.text_projection(pooled_output)  # [batch, 512]
+
+                # Normalize
+                embeddings = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
 
                 # Apply projection if configured
                 embeddings = self._apply_projection(embeddings, output_dim)
