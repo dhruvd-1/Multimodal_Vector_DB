@@ -99,24 +99,27 @@ class AudioEmbedder(BaseEmbedder):
         Load CLAP model.
 
         Downloads pre-trained weights on first use (~1.8GB).
-        Uses D: drive for caching to avoid C: drive space issues.
+        Uses user's home directory for caching.
         """
         print(f"Loading CLAP model: {self.model_name}")
-        
-        # Configure cache directories to use D: drive if C: drive is constrained
-        # This avoids disk space issues on the system drive
-        cache_dir = "D:\\.cache"
+
+        # Configure cache directories - use user's home directory
+        from pathlib import Path
+        cache_dir = os.path.join(Path.home(), '.cache', 'multimodal_db')
         os.makedirs(cache_dir, exist_ok=True)
         
         # Set environment variables for model caching
         os.environ['TORCH_HOME'] = os.path.join(cache_dir, 'torch')
         os.environ['HF_HOME'] = os.path.join(cache_dir, 'huggingface')
-        
-        # CLAP uses a custom cache directory  
+        os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+        os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'  # Faster downloads
+
+        # CLAP uses a custom cache directory
         clap_cache = os.path.join(cache_dir, 'laion_clap')
         os.makedirs(clap_cache, exist_ok=True)
-        
+
         print(f"📁 Using cache directory: {cache_dir}")
+        print("⏳ Downloading CLAP model (~500MB)... This may take a few minutes on first run.")
         
         # Workaround for PyTorch 2.6+ security changes with CLAP
         # The CLAP library uses torch.load which defaults to weights_only=True in 2.6+
@@ -141,15 +144,30 @@ class AudioEmbedder(BaseEmbedder):
 
         try:
             import laion_clap
+            import torchaudio
+
+            print("⏳ Initializing CLAP module...")
+
+            # Initialize torchaudio backend (required for CLAP)
+            try:
+                torchaudio.set_audio_backend("soundfile")  # Use soundfile backend
+                print("✓ Torchaudio backend set to 'soundfile'")
+            except Exception as e:
+                print(f"⚠️  Could not set torchaudio backend: {e}")
+                print("   Install soundfile: pip install soundfile")
 
             # Use default model configuration - let CLAP handle it
             self._clap = laion_clap.CLAP_Module(
                 enable_fusion=self.enable_fusion,
-                device=self.device
+                device=self.device,
+                amodel='HTSAT-tiny'  # Use smaller model for faster download
             )
-            
+
+            print("⏳ Loading checkpoint (downloading if needed)...")
+            print("   If download is stuck, press Ctrl+C and run: pip install --upgrade huggingface-hub")
+
             self._clap.load_ckpt()
-            
+
             # Restore original functions
             torch.load = original_torch_load
             Module.load_state_dict = original_load_state_dict
@@ -192,7 +210,7 @@ class AudioEmbedder(BaseEmbedder):
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
         # Get audio embedding (returns already as numpy array)
-        embedding = self._clap.get_audio_embedding_from_filelist([audio_path])
+        embedding = self._clap.get_audio_embedding_from_filelist(x=[audio_path])
 
         # Normalize
         emb = embedding[0]
@@ -222,10 +240,7 @@ class AudioEmbedder(BaseEmbedder):
         for i in range(0, len(audio_paths), batch_size):
             batch = audio_paths[i:i + batch_size]
 
-            embeddings = self._clap.get_audio_embedding_from_filelist(
-                batch,
-                use_tensor=False
-            )
+            embeddings = self._clap.get_audio_embedding_from_filelist(x=batch)
             all_embeddings.append(embeddings)
 
         embeddings = np.vstack(all_embeddings)
