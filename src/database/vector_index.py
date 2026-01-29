@@ -41,9 +41,6 @@ class VectorIndex:
         """
         print(f"Building {self.index_type} index with dimension {self.dimension}")
 
-        if self.index_type != 'hnsw':
-            raise ValueError(f"Only 'hnsw' index type is supported, got: {self.index_type}")
-
         # Map metric names
         space_map = {
             'cosine': 'cosine',
@@ -55,9 +52,15 @@ class VectorIndex:
             raise ValueError(f"Unknown metric: {self.metric}. Use 'cosine', 'l2', or 'ip'")
 
         # Initialize hnswlib index
-        self.index = hnswlib.Index(space=space_map[self.metric], dim=self.dimension)
-        self.index.init_index(max_elements=max_elements, ef_construction=ef_construction, M=M)
-        self.index.set_ef(50)  # Default ef for search
+        if self.index_type == 'hnsw':
+            self.index = hnswlib.Index(space=space_map[self.metric], dim=self.dimension)
+            self.index.init_index(max_elements=max_elements, ef_construction=ef_construction, M=M)
+            self.index.set_ef(50)  # Default ef for search
+        elif self.index_type == 'flat':
+            self.index = hnswlib.BFIndex(space=space_map[self.metric], dim=self.dimension)
+            self.index.init_index(max_elements=max_elements)
+        else:
+            raise ValueError(f"Unsupported index type: {self.index_type}. Use 'hnsw' or 'flat'")
 
         print(f"Index built successfully")
 

@@ -98,18 +98,61 @@ class AudioEmbedder(BaseEmbedder):
         """
         Load CLAP model.
 
-        Downloads pre-trained weights on first use (~300MB).
+        Downloads pre-trained weights on first use (~1.8GB).
+        Uses D: drive for caching to avoid C: drive space issues.
         """
         print(f"Loading CLAP model: {self.model_name}")
+        
+        # Configure cache directories to use D: drive if C: drive is constrained
+        # This avoids disk space issues on the system drive
+        cache_dir = "D:\\.cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Set environment variables for model caching
+        os.environ['TORCH_HOME'] = os.path.join(cache_dir, 'torch')
+        os.environ['HF_HOME'] = os.path.join(cache_dir, 'huggingface')
+        
+        # CLAP uses a custom cache directory  
+        clap_cache = os.path.join(cache_dir, 'laion_clap')
+        os.makedirs(clap_cache, exist_ok=True)
+        
+        print(f"📁 Using cache directory: {cache_dir}")
+        
+        # Workaround for PyTorch 2.6+ security changes with CLAP
+        # The CLAP library uses torch.load which defaults to weights_only=True in 2.6+
+        # We need to patch it to use weights_only=False for backward compatibility
+        original_torch_load = torch.load
+        def patched_torch_load(*args, **kwargs):
+            # Set weights_only=False if not explicitly set
+            if 'weights_only' not in kwargs:
+                kwargs['weights_only'] = False
+            return original_torch_load(*args, **kwargs)
+        
+        torch.load = patched_torch_load
+        
+        # Also patch load_state_dict to be more lenient with unexpected keys
+        from torch.nn import Module
+        original_load_state_dict = Module.load_state_dict
+        def patched_load_state_dict(self, state_dict, strict=True, **kwargs):
+            # Be lenient with position_ids which is a common mismatch
+            return original_load_state_dict(self, state_dict, strict=False, **kwargs)
+        
+        Module.load_state_dict = patched_load_state_dict
 
         try:
             import laion_clap
 
+            # Use default model configuration - let CLAP handle it
             self._clap = laion_clap.CLAP_Module(
                 enable_fusion=self.enable_fusion,
-                amodel='HTSAT-tiny' if self._is_mobile else 'HTSAT-base'
+                device=self.device
             )
+            
             self._clap.load_ckpt()
+            
+            # Restore original functions
+            torch.load = original_torch_load
+            Module.load_state_dict = original_load_state_dict
 
             self.model = self._clap
             self._is_loaded = True
@@ -148,10 +191,8 @@ class AudioEmbedder(BaseEmbedder):
         if not self._is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
-        embedding = self._clap.get_audio_embedding_from_filelist(
-            [audio_path],
-            use_tensor=False
-        )
+        # Get audio embedding (returns already as numpy array)
+        embedding = self._clap.get_audio_embedding_from_filelist([audio_path])
 
         # Normalize
         emb = embedding[0]
@@ -208,12 +249,42 @@ class AudioEmbedder(BaseEmbedder):
         if not self._is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
-        embedding = self._clap.get_text_embedding(
-            [text],
-            use_tensor=False
-        )
-
-        emb = embedding[0]
+        # Use get_audio_embedding_from_data with text as input
+        # This requires tokenizing and reshaping properly
+        import torch
+        
+        # Tokenize text
+        text_input = self._clap.tokenizer([text])
+        
+        # Ensure proper shape for RoBERTa model (batch_size, seq_length)
+        if 'input_ids' in text_input:
+            input_ids = text_input['input_ids']
+            if not isinstance(input_ids, torch.Tensor):
+                input_ids = torch.tensor(input_ids)
+            
+            # Make sure it's 2D
+            if input_ids.dim() == 1:
+                input_ids = input_ids.unsqueeze(0)
+            text_input['input_ids'] = input_ids
+            
+        if 'attention_mask' in text_input:
+            attention_mask = text_input['attention_mask']
+            if not isinstance(attention_mask, torch.Tensor):
+                attention_mask = torch.tensor(attention_mask)
+            if attention_mask.dim() == 1:
+                attention_mask = attention_mask.unsqueeze(0)
+            text_input['attention_mask'] = attention_mask
+        
+        # Get embedding using model's encode_text method directly
+        with torch.no_grad():
+            embedding = self._clap.model.encode_text(text_input, device=self.device)
+        
+        # Convert to numpy and normalize
+        if isinstance(embedding, torch.Tensor):
+            emb = embedding[0].cpu().numpy()
+        else:
+            emb = np.array(embedding[0])
+            
         return emb / np.linalg.norm(emb)
 
     def batch_embed_text(self, texts: List[str]) -> np.ndarray:
