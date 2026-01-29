@@ -22,9 +22,7 @@ def search_audio(query, k=5):
         query: Text query (e.g., "dog barking")
         k: Number of results to return
     """
-    print(f"\n{'='*80}")
-    print(f"AUDIO SEARCH: '{query}'")
-    print("="*80)
+   
 
     # Load index
     print("\n1. Loading HNSW index...")
@@ -61,9 +59,7 @@ def search_audio(query, k=5):
 
 
 def main():
-    """Interactive search"""
-    print("\n🔍 AUDIO SEARCH (ESC-50)")
-    print("="*80)
+    
 
     if not os.path.exists(f"{INDEX_PATH}.index"):
         print(f"\n❌ Index not found at {INDEX_PATH}")
@@ -72,17 +68,10 @@ def main():
 
     # Example queries
     example_queries = [
-        "dog barking",
-        "thunderstorm with rain",
-        "people clapping",
-        "door knocking",
-        "vacuum cleaner sound",
-        "bird chirping",
-        "car engine",
-        "water flowing"
+        "bird chirping in the morning",
     ]
 
-    print("\nExample queries:")
+    
     for i, q in enumerate(example_queries, 1):
         print(f"  {i}. {q}")
 
@@ -93,7 +82,6 @@ def main():
         search_audio(query, k=5)
         print("\n" + "-"*80)
 
-    print("\n💡 To search with your own query, modify this script or run:")
     print("   python -c \"from search_audio import search_audio; search_audio('your query here')\"")
 
 

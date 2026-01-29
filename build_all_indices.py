@@ -243,6 +243,7 @@ def main():
     print("  - Images: Flickr30k (~31,000 images)")
     print("  - Videos: TrainValVideo")
     print("  - Audio: ESC-50 (~2,000 audio files)")
+    print("  - Text: Wikipedia Simple English (~249k articles)")
     print("\nIndices will be saved to:", os.path.abspath(INDICES_DIR))
     print("\n" + "="*80)
 
@@ -283,10 +284,13 @@ def main():
             print(f"  {modality.upper()}: SKIPPED")
 
     print(f"\nIndices saved in: {os.path.abspath(INDICES_DIR)}")
+    print("\n⚠️  NOTE: Text index must be built separately (takes longer)")
+    print("   Run: python build_text_index.py")
     print("\nNext steps:")
     print("  - Use search_images.py to search images")
     print("  - Use search_videos.py to search videos")
     print("  - Use search_audio.py to search audio")
+    print("  - Use search_text.py to search Wikipedia articles (after building text index)")
 
 
 if __name__ == "__main__":

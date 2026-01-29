@@ -4,20 +4,25 @@
 
 ### Step 1: Build HNSW Indices for ALL Datasets
 
-This indexes all your data (images, videos, audio) and saves the indices to disk.
+This indexes all your data (images, videos, audio, text) and saves the indices to disk.
 **You only need to run this ONCE** (or when you add new data).
 
 ```bash
+# Build image, video, audio indices
 python build_all_indices.py
+
+# Build text index separately (takes longer ~10-20 min)
+python build_text_index.py
 ```
 
 This will:
 - ✅ Index ~31,000 Flickr30k images
 - ✅ Index all videos in TrainValVideo
 - ✅ Index ~2,000 ESC-50 audio files
+- ✅ Index ~249,000 Wikipedia articles
 - ✅ Save indices to `saved_indices/` folder
 
-**Time:** ~10-20 minutes depending on your system
+**Time:** ~15-30 minutes total depending on your system
 
 ---
 
@@ -55,27 +60,38 @@ Or search with your own query:
 python -c "from search_audio import search_audio; search_audio('dog barking')"
 ```
 
+### Search Text (Wikipedia)
+```bash
+python search_text.py
+```
+
+Or search with your own query:
+```bash
+python -c "from search_text import search_text; search_text('quantum physics')"
+```
+
 ---
 
 ## 📂 File Structure
 
 ```
 Multimodal db/
-├── build_all_indices.py        # Build & save HNSW indices (run once)
+├── build_all_indices.py        # Build image/video/audio indices
+├── build_text_index.py          # Build text index (separate, larger)
 ├── search_images.py             # Search images with text
 ├── search_videos.py             # Search videos with text
 ├── search_audio.py              # Search audio with text
+├── search_text.py               # Search Wikipedia articles
 ├── saved_indices/               # Saved HNSW indices (persistent)
-│   ├── image_index.index        # Image HNSW index
-│   ├── image_index.metadata     # Image metadata
-│   ├── video_index.index        # Video HNSW index
-│   ├── video_index.metadata     # Video metadata
-│   ├── audio_index.index        # Audio HNSW index
-│   └── audio_index.metadata     # Audio metadata
+│   ├── image_index.*            # Image HNSW index + metadata
+│   ├── video_index.*            # Video HNSW index + metadata
+│   ├── audio_index.*            # Audio HNSW index + metadata
+│   └── text_index.*             # Text HNSW index + metadata
 ├── data/raw/                    # Your datasets
 │   ├── archive/                 # Flickr30k images
 │   ├── archive (1)/             # ESC-50 audio
-│   └── archive (2)/             # Videos
+│   ├── archive (2)/             # Videos
+│   └── archive(3)/              # Wikipedia Simple English text
 └── src/                         # Source code
     ├── embedders/               # Image, video, audio, text embedders
     └── database/                # Vector index (HNSW)
@@ -126,13 +142,16 @@ python build_all_indices.py
 - **Images**: Flickr30k (~31,000 images with captions)
 - **Videos**: TrainValVideo
 - **Audio**: ESC-50 (~2,000 environmental sounds, 50 categories)
+- **Text**: Wikipedia Simple English (~249,000 articles, 31M tokens)
 
 ---
 
 ## 🚀 Next Steps
 
 1. Build indices: `python build_all_indices.py`
-2. Search images: `python search_images.py`
-3. Search videos: `python search_videos.py`
-4. Search audio: `python search_audio.py`
-5. Customize queries in each script!
+2. Build text index: `python build_text_index.py`
+3. Search images: `python search_images.py`
+4. Search videos: `python search_videos.py`
+5. Search audio: `python search_audio.py`
+6. Search text: `python search_text.py`
+7. Customize queries in each script!

@@ -63,22 +63,17 @@ def search_images(query, k=5):
 
 
 def main():
-    """Interactive search"""
-    print("\n🔍 IMAGE SEARCH (Flickr30k)")
-    print("="*80)
+    
 
     if not os.path.exists(f"{INDEX_PATH}.index"):
-        print(f"\n❌ Index not found at {INDEX_PATH}")
+        print(f"\n Index not found at {INDEX_PATH}")
         print("   Run: python build_all_indices.py")
         return
 
-    # Example queries
+    
     example_queries = [
-        "a dog running in the park",
-        "people playing soccer",
-        "a child eating ice cream",
-        "sunset over the ocean",
-        "a person riding a bicycle"
+        "that one vid where im driving a car",
+        
     ]
 
     print("\nExample queries:")

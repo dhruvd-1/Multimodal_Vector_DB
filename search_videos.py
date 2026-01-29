@@ -60,36 +60,26 @@ def search_videos(query, k=5):
 
 
 def main():
-    """Interactive search"""
-    print("\n🔍 VIDEO SEARCH")
-    print("="*80)
+    
 
     if not os.path.exists(f"{INDEX_PATH}.index"):
-        print(f"\n❌ Index not found at {INDEX_PATH}")
+        print(f"\n Index not found at {INDEX_PATH}")
         print("   Run: python build_all_indices.py")
         return
 
-    # Example queries
     example_queries = [
-        "a person walking",
-        "someone dancing",
-        "people talking",
-        "a car driving",
-        "someone cooking"
+        "dancers in the street",
+        "a cat playing with a toy"
     ]
 
     print("\nExample queries:")
     for i, q in enumerate(example_queries, 1):
         print(f"  {i}. {q}")
 
-    print("\n" + "="*80)
-
-    # Run example queries
-    for query in example_queries[:3]:  # Run first 3 examples
+    for query in example_queries[:3]:  
         search_videos(query, k=5)
         print("\n" + "-"*80)
 
-    print("\n💡 To search with your own query, modify this script or run:")
     print("   python -c \"from search_videos import search_videos; search_videos('your query here')\"")
 
 
