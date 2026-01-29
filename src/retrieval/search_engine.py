@@ -14,7 +14,7 @@ class MultiModalSearchEngine:
                  embedding_dim: int = 512,
                  model_name: str = "openai/clip-vit-base-patch32",
                  device: str = 'cpu',
-                 index_type: str = 'flat',
+                 index_type: str = 'hnsw',
                  storage_path: Optional[str] = None):
         """
         Initialize multimodal search engine.

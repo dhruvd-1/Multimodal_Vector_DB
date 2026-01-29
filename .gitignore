@@ -30,7 +30,12 @@ db/
 *.h5
 *.pkl
 *.pth
+*.pt
 checkpoints/
+*.tmp
+*_best.*
+models/*.pt
+models/*.pth
 
 # Test outputs
 .pytest_cache/
