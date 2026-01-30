@@ -25,7 +25,10 @@ Thumbs.db
 # Project-specific
 *.zip
 *.tar.gz
+*.rar
+*.7z
 data/
+models/
 db/
 *.h5
 *.pkl
@@ -36,6 +39,29 @@ checkpoints/
 *_best.*
 models/*.pt
 models/*.pth
+saved_indices/
+
+# Large dataset files
+*.csv
+*.txt
+*.json
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flac
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+
+# Vector indices (heavy files)
+*.index
+*.metadata
+saved_indices/
 
 # Test outputs
 .pytest_cache/
@@ -46,6 +72,15 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# LaTeX build files
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
 
 # uv lock file (optional, depends on your preference)
 # uv.lock
